@@ -1,0 +1,22 @@
+# Environment / secrets
+.env
+
+# Raw scraped data (large, regeneratable)
+data/raw/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
