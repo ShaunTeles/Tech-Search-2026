@@ -8,13 +8,14 @@ Outputs data/raw/deduped.json
 import json
 import re
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 INPUT_FILE = Path(__file__).parent.parent / "data" / "raw" / "merged.json"
 OUTPUT_FILE = Path(__file__).parent.parent / "data" / "raw" / "deduped.json"
 
 
-def normalise_domain(url: str) -> str | None:
+def normalise_domain(url: str) -> Optional[str]:
     if not url:
         return None
     url = url.strip()

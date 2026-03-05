@@ -1,83 +1,73 @@
 """
-Scraper for startupjobs.cz/firmy — Czech startup company directory.
-Uses ScrapeGraphAI (SmartScraperMultiGraph) with Groq as the LLM.
+Scraper for startupjobs.cz — uses their internal API directly.
+No browser needed — pure HTTP requests.
+~3,800+ companies across 214 pages.
 """
 
 import json
-import os
+import time
+import requests
 from pathlib import Path
-from dotenv import load_dotenv
-from scrapegraphai.graphs import SmartScraperGraph
-
-load_dotenv()
 
 OUTPUT_FILE = Path(__file__).parent.parent / "data" / "raw" / "startupjobs_companies.json"
 
-# Pages to scrape (startupjobs.cz paginates company listings)
-BASE_URLS = [f"https://www.startupjobs.cz/firmy?page={i}" for i in range(1, 16)]
-
-GRAPH_CONFIG = {
-    "llm": {
-        "model": "groq/llama3-70b-8192",
-        "api_key": os.getenv("GROQ_API_KEY"),
-    },
-    "verbose": False,
-    "headless": True,
+API_URL = "https://www.startupjobs.cz/api/front/companies"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Referer": "https://www.startupjobs.cz/firmy",
 }
-
-PROMPT = """
-Extract all company listings from this page.
-For each company return:
-- name: company name
-- website: company website URL (if shown)
-- size: employee count or range (e.g. "10-50", "50-200")
-- tech_stack: list of technologies mentioned (if any)
-- city: office city (look for Prague / Praha)
-- description: short description (1-2 sentences max)
-- source: set to "startupjobs"
-
-Only include companies that have an office in Prague / Praha.
-Return a JSON array of objects.
-"""
+MAX_PAGES = 220
 
 
-def scrape_startupjobs():
+def fetch_page(page_num: int) -> list[dict]:
+    params = {"page": page_num, "followedOnly": "false"}
+    resp = requests.get(API_URL, params=params, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def scrape_startupjobs() -> list[dict]:
     all_results = []
-    seen_names = set()
+    seen_ids = set()
 
-    for i, url in enumerate(BASE_URLS):
-        print(f"  Scraping page {i+1}/{len(BASE_URLS)}: {url}")
+    for page_num in range(1, MAX_PAGES + 1):
         try:
-            graph = SmartScraperGraph(
-                prompt=PROMPT,
-                source=url,
-                config=GRAPH_CONFIG,
-            )
-            result = graph.run()
+            items = fetch_page(page_num)
+            if not items:
+                print(f"  Page {page_num}: empty — done")
+                break
 
-            # Result may be a list or a dict with a key
-            if isinstance(result, list):
-                companies = result
-            elif isinstance(result, dict):
-                companies = next(
-                    (v for v in result.values() if isinstance(v, list)), []
-                )
-            else:
-                companies = []
+            new = []
+            for item in items:
+                company_id = item.get("id")
+                if company_id in seen_ids:
+                    continue
+                seen_ids.add(company_id)
 
-            new = [c for c in companies if c.get("name") and c["name"] not in seen_names]
-            seen_names.update(c["name"] for c in new)
+                slug = item.get("slug", "")
+                new.append({
+                    "name": item.get("name"),
+                    "description": item.get("introduction") or item.get("introduction_en"),
+                    "industry": item.get("area", {}).get("en") or item.get("area", {}).get("cs"),
+                    "startupjobs_url": f"https://www.startupjobs.cz/startup/{slug}" if slug else None,
+                    "city": "Prague",
+                    "source": "startupjobs",
+                })
+
             all_results.extend(new)
-            print(f"    Found {len(new)} new companies (total: {len(all_results)})")
+            if page_num % 20 == 0 or page_num == 1:
+                print(f"  Page {page_num}: +{len(new)} companies (total: {len(all_results)})")
+
+            time.sleep(0.15)  # polite delay
 
         except Exception as e:
-            print(f"    Error on page {i+1}: {e}")
+            print(f"  Error on page {page_num}: {e}")
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-    print(f"\nStartupjobs scraper done. {len(all_results)} companies saved to {OUTPUT_FILE}")
+    print(f"\nStartupJobs scraper done. {len(all_results)} companies saved to {OUTPUT_FILE}")
     return all_results
 
 

@@ -80,10 +80,9 @@ def export_google_sheets(records: list[dict]):
     try:
         if service_account_path.exists():
             gc = gspread.service_account(filename=str(service_account_path))
-        elif creds_path.exists():
-            gc = gspread.oauth(credentials_path=str(creds_path))
         else:
-            gc = gspread.oauth()  # falls back to default OAuth flow
+            # gspread 6.x: oauth() auto-reads from ~/.config/gspread/credentials.json
+            gc = gspread.oauth()
 
         # Create or open sheet
         try:

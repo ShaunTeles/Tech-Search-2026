@@ -1,8 +1,10 @@
 """
 ARES scraper — Czech official business trade register.
 Free REST API, no key required.
-Queries NACE code section J (Information and Communication) for Praha.
-Docs: https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/
+Searches NACE codes 58-63 (IT/tech sector) for Praha companies.
+
+API note: obchodniJmeno (name fragment) is required. We cycle through
+common tech business name fragments to cover the full company list.
 """
 
 import json
@@ -14,20 +16,32 @@ OUTPUT_FILE = Path(__file__).parent.parent / "data" / "raw" / "ares_companies.js
 
 ARES_API = "https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/vyhledat"
 
-# NACE section J = Information and Communication
-# Subsections: 58-63 (publishing, telecom, IT, data processing, etc.)
-NACE_CODES = ["58", "59", "60", "61", "62", "63"]
+# NACE section J = Information and Communication (62 = IT/software is most relevant)
+NACE_CODES = ["62", "63", "58", "61", "59", "60"]
+
+# Common fragments in Czech tech company names — cycling gives broad coverage
+NAME_FRAGMENTS = [
+    "software", "tech", "digital", "data", "cloud", "net", "web",
+    "system", "solutions", "services", "consulting", "it ", "app",
+    "dev", "code", "smart", "mobile", "platform", "media", "labs",
+    "studio", "group", "agency", "innovation", "cyber", "ai",
+    "analytics", "security", "automation", "design", "ware",
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k",
+    "l", "m", "n", "o", "p", "r", "s", "t", "u", "v", "z",
+]
 
 HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
+PAGE_SIZE = 100
+MAX_PER_QUERY = 1000
 
 
-def fetch_ares_page(nace_prefix: str, start: int = 0, size: int = 100) -> dict:
+def fetch_ares_page(name_fragment: str, nace: str, start: int = 0) -> dict:
     payload = {
-        "pocet": size,
+        "pocet": PAGE_SIZE,
         "start": start,
-        "obec": "Praha",
-        "naceKod": nace_prefix,
-        "jenAktivni": True,
+        "obchodniJmeno": name_fragment,
+        "sidlo": {"obec": "Praha"},
+        "naceKody": [nace],
     }
     resp = requests.post(ARES_API, json=payload, headers=HEADERS, timeout=30)
     resp.raise_for_status()
@@ -39,44 +53,48 @@ def scrape_ares():
     seen_icos = set()
 
     for nace in NACE_CODES:
-        print(f"  NACE {nace}x (Prague)...")
-        start = 0
-        page_size = 100
+        print(f"  NACE {nace} (Prague)...")
 
-        while True:
-            try:
-                data = fetch_ares_page(nace, start=start, size=page_size)
-                items = data.get("ekonomickeSubjekty", [])
+        for fragment in NAME_FRAGMENTS:
+            start = 0
+            while True:
+                try:
+                    data = fetch_ares_page(fragment, nace, start=start)
 
-                if not items:
+                    # Too many results error — skip this fragment
+                    if data.get("subKod") == "VYSTUP_PRILIS_MNOHO_VYSLEDKU":
+                        break
+
+                    items = data.get("ekonomickeSubjekty", [])
+                    if not items:
+                        break
+
+                    for item in items:
+                        ico = item.get("ico")
+                        if not ico or ico in seen_icos:
+                            continue
+                        seen_icos.add(ico)
+
+                        address = item.get("sidlo", {})
+                        all_results.append({
+                            "name": item.get("obchodniJmeno"),
+                            "ico": ico,
+                            "address": address.get("textovaAdresa"),
+                            "city": "Prague",
+                            "nace": nace,
+                            "source": "ares",
+                        })
+
+                    total = data.get("pocetCelkem", 0)
+                    start += PAGE_SIZE
+                    if start >= total or start >= MAX_PER_QUERY:
+                        break
+
+                    time.sleep(0.2)
+
+                except Exception as e:
+                    print(f"    Error (NACE {nace}, '{fragment}', start={start}): {e}")
                     break
-
-                for item in items:
-                    ico = item.get("ico")
-                    if ico in seen_icos:
-                        continue
-                    seen_icos.add(ico)
-
-                    address = item.get("sidlo", {})
-                    all_results.append({
-                        "name": item.get("obchodniJmeno"),
-                        "ico": ico,
-                        "address": address.get("textovaAdresa"),
-                        "city": "Prague",
-                        "nace": nace,
-                        "source": "ares",
-                    })
-
-                total = data.get("pocetCelkem", 0)
-                start += page_size
-                if start >= total or start >= 500:  # cap at 500 per NACE
-                    break
-
-                time.sleep(0.3)  # be polite to the API
-
-            except Exception as e:
-                print(f"    Error at NACE {nace} start={start}: {e}")
-                break
 
         print(f"    Running total: {len(all_results)} companies")
 

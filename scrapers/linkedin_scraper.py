@@ -1,77 +1,95 @@
 """
-LinkedIn scraper using ScrapeGraphAI — targeted search pages only.
-LinkedIn blocks mass crawling, so we only target public search result pages.
-This is intentionally conservative to avoid IP blocks.
+Czech tech company scraper using Serper API job search results.
+Searches for companies posting jobs in Prague across multiple tech categories.
+This replaces LinkedIn scraping (which is blocked without auth).
+Uses Serper API — same key as google_search_scraper.py.
 """
 
 import json
 import os
+import re
+import time
+import requests
 from pathlib import Path
+from urllib.parse import urlparse
 from dotenv import load_dotenv
-from scrapegraphai.graphs import SmartScraperGraph
 
 load_dotenv()
 
 OUTPUT_FILE = Path(__file__).parent.parent / "data" / "raw" / "linkedin_companies.json"
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+SERPER_ENDPOINT = "https://google.serper.dev/search"
 
-# Targeted public LinkedIn search pages for Prague tech companies
-URLS = [
-    "https://www.linkedin.com/search/results/companies/?keywords=tech%20Prague&origin=GLOBAL_SEARCH_HEADER",
-    "https://www.linkedin.com/search/results/companies/?keywords=software%20Praha&origin=GLOBAL_SEARCH_HEADER",
-    "https://www.linkedin.com/search/results/companies/?keywords=startup%20Prague%20Czech&origin=GLOBAL_SEARCH_HEADER",
+# Job-specific queries that return Prague company results
+QUERIES = [
+    "software engineer jobs Prague site:jobs.cz OR site:linkedin.com",
+    "product manager jobs Prague Czech tech company",
+    "UX designer Prague tech company hiring",
+    "backend developer Praha startup hiring",
+    "data engineer jobs Prague company",
+    "DevOps engineer Prague tech firm",
+    "mobile developer Prague company 2024 2025",
+    "machine learning engineer Prague hiring",
 ]
 
-GRAPH_CONFIG = {
-    "llm": {
-        "model": "groq/llama3-70b-8192",
-        "api_key": os.getenv("GROQ_API_KEY"),
-    },
-    "verbose": False,
-    "headless": True,
-}
 
-PROMPT = """
-Extract all company listings visible on this LinkedIn search results page.
-For each company return:
-- name: company name
-- industry: industry or category shown
-- size: employee count or range (if shown)
-- city: city (look for Prague / Praha)
-- linkedin_url: the LinkedIn company page URL
-- source: set to "linkedin"
+def extract_company_from_result(item: dict) -> dict | None:
+    title = item.get("title", "")
+    snippet = item.get("snippet", "")
+    url = item.get("link", "")
 
-Only include companies based in Prague / Praha / Czech Republic.
-Return a JSON array of objects.
-"""
+    # Try to extract company name from title — usually "Job Title at Company | ..."
+    company = None
+    for pattern in [r" at ([^|–\-]+)", r"[\|–\-] ([^|–\-]{3,50})$"]:
+        m = re.search(pattern, title)
+        if m:
+            candidate = m.group(1).strip()
+            # Filter out job board names
+            if not any(skip in candidate.lower() for skip in ["jobs", "linkedin", "glassdoor", "indeed", "jobs.cz", "startupjobs"]):
+                company = candidate
+                break
+
+    if not company:
+        return None
+
+    domain = urlparse(url).netloc.replace("www.", "") if url else None
+
+    return {
+        "name": company,
+        "website": None,
+        "description": snippet[:200] if snippet else None,
+        "city": "Prague",
+        "source": "job_search",
+    }
 
 
-def scrape_linkedin():
+def scrape_linkedin() -> list[dict]:
+    if not SERPER_API_KEY:
+        print("ERROR: SERPER_API_KEY not set in .env")
+        return []
+
     all_results = []
     seen_names = set()
 
-    for url in URLS:
-        print(f"  Scraping: {url[:80]}...")
+    for query in QUERIES:
+        print(f"  Query: {query[:60]}...")
         try:
-            graph = SmartScraperGraph(
-                prompt=PROMPT,
-                source=url,
-                config=GRAPH_CONFIG,
-            )
-            result = graph.run()
+            headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
+            payload = {"q": query, "num": 10, "gl": "cz"}
+            resp = requests.post(SERPER_ENDPOINT, json=payload, headers=headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
 
-            if isinstance(result, list):
-                companies = result
-            elif isinstance(result, dict):
-                companies = next(
-                    (v for v in result.values() if isinstance(v, list)), []
-                )
-            else:
-                companies = []
+            new_count = 0
+            for item in data.get("organic", []):
+                company = extract_company_from_result(item)
+                if company and company["name"] not in seen_names:
+                    seen_names.add(company["name"])
+                    all_results.append(company)
+                    new_count += 1
 
-            new = [c for c in companies if c.get("name") and c["name"] not in seen_names]
-            seen_names.update(c["name"] for c in new)
-            all_results.extend(new)
-            print(f"    Found {len(new)} new companies (total: {len(all_results)})")
+            print(f"    +{new_count} companies (total: {len(all_results)})")
+            time.sleep(0.3)
 
         except Exception as e:
             print(f"    Error: {e}")
@@ -80,7 +98,7 @@ def scrape_linkedin():
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-    print(f"\nLinkedIn scraper done. {len(all_results)} companies saved to {OUTPUT_FILE}")
+    print(f"\nJob search scraper done. {len(all_results)} companies saved to {OUTPUT_FILE}")
     return all_results
 
 
